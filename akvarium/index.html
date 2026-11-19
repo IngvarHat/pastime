@@ -26,11 +26,22 @@
   #pad{display:none;position:fixed;right:14px;bottom:70px;grid-template-columns:repeat(3,44px);gap:6px;}
   #pad button{padding:0;height:44px;font-size:12px;}
   @media (hover:hover){#pad{display:none !important}}
+  #notice{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);max-width:min(520px,90vw);background:#0b0f1aee;border:2px solid #7fd3ff;padding:16px 18px;font-size:9px;line-height:2;color:#e8f6ff;z-index:8}
+  #notice button{margin-top:10px}
+  #pipvideo{position:fixed;right:14px;bottom:70px;width:2px;height:2px;opacity:0;pointer-events:none;z-index:7;border:2px solid #7fd3ff;background:#000}
+  #pipvideo.show{width:320px;height:180px;opacity:1;pointer-events:auto}
+  body.clean .hint, body.clean .bar, body.clean #label{display:none !important}
+  #showui{display:none;position:fixed;right:10px;top:10px;padding:6px 8px;font-size:9px;opacity:.25;z-index:6}
+  #showui:hover{opacity:1}
+  body.clean #showui{display:block}
 </style>
 </head>
 <body>
-<div class="hint">Dra: roter · Høyreklikk/to fingre: panorer · Scroll: zoom<br>Klikk i vannet: mat · Dobbeltklikk: bank på glasset · Klikk på en fisk: velg · «Ubåt»: kjør selv<br><span id="count"></span></div>
+<div class="hint">Dra: roter · Høyreklikk/to fingre: panorer · Scroll: zoom<br>Klikk i vannet: mat · Dobbeltklikk: bank på glasset · Klikk på en fisk: velg · «Ubåt»: kjør selv<br>P: bilde i bilde · H: skjul menyen<br><span id="count"></span></div>
 <div id="porthole"></div>
+<div id="notice"><div id="noticetxt"></div><button id="noticeok">OK</button></div>
+<video id="pipvideo" muted playsinline></video>
+<button id="showui">Vis meny</button>
 <div id="hud"></div>
 <div id="pad">
   <button data-k="up">▲</button><button data-k="fwd">W</button><button data-k="down">▼</button>
@@ -47,6 +58,7 @@
   <button id="snd">Lyd: av</button>
   <button id="pix">Piksler: 3</button>
   <button id="rot">Auto-rotér</button>
+  <button id="pipbtn">Bilde i bilde</button>
 </div>
 
 <div id="err" style="display:none;position:fixed;inset:0;padding:24px;font-size:11px;line-height:1.8;background:#0b0f1a;color:#ffb3b3;white-space:pre-wrap;z-index:9"></div>
@@ -139,7 +151,7 @@ const XM = 16, ZM = 8, SURF = 17.5;
 const sandH = (x, z) => Math.round((0.9 + 0.35 * Math.sin(x * 0.28) + 0.25 * Math.sin(z * 0.45 + 1.2) + 0.2 * Math.sin((x - z) * 0.5)) / 0.25) * 0.25;
 
 let renderer;
-try { renderer = new THREE.WebGLRenderer({ antialias: false }); }
+try { renderer = new THREE.WebGLRenderer({ antialias: true }); } // MSAA stops thin edges (book spines, rafters) from crawling as the camera moves
 catch (e) { showErr('WebGL er ikke tilgjengelig i denne nettleseren: ' + e.message); throw e; }
 let pixelSize = store.data.pixelSize || 3;
 renderer.setPixelRatio(pixelSize === 1 ? Math.min(2, devicePixelRatio) : 1 / pixelSize);
@@ -177,7 +189,7 @@ sun.position.set(30, 26, -2);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 Object.assign(sun.shadow.camera, { left: -42, right: 42, top: 42, bottom: -42, near: 1, far: 120 });
-sun.shadow.bias = -0.0008;
+sun.shadow.bias = -0.0008; sun.shadow.normalBias = 0.04;
 scene.add(sun);
 
 // ================= Voxel helpers =================
@@ -190,7 +202,7 @@ let night = false, glowLevel = 0;
 function instanced(list, size, mat, useColor = true) {
   const m = new THREE.InstancedMesh(BOX, mat, list.length);
   list.forEach((v, i) => {
-    D.position.set(v.x * size, v.y * size, v.z * size); D.rotation.set(0, 0, 0); D.scale.setScalar(size); D.updateMatrix();
+    D.position.set(v.x * size, v.y * size, v.z * size); D.rotation.set(0, 0, 0); D.scale.setScalar(size * 1.012); D.updateMatrix(); // slight overlap closes the hairline cracks between neighbouring voxels
     m.setMatrixAt(i, D.matrix);
     if (useColor) m.setColorAt(i, C.set(v.c));
   });
@@ -278,11 +290,14 @@ const attic = new THREE.Group();
   const scene = attic;
   const matCache = {};
   const M = c => matCache[c] || (matCache[c] = new THREE.MeshStandardMaterial({ color: c, roughness: 0.92 }));
-  const box = (w, h, d, x, y, z, c, ry = 0) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), typeof c === 'string' ? M(c) : c); m.position.set(x, y, z); m.rotation.y = ry; m.castShadow = m.receiveShadow = true; scene.add(m); return m; };
-  const vox = (nx, ny, nz, fn, size, x, y, z, ry = 0, rx = 0, rz = 0) => { const g = voxelGroup(voxelize(nx, ny, nz, fn, -Math.floor(nx / 2), 0, -Math.floor(nz / 2)), size); g.position.set(x, y, z); g.rotation.set(rx, ry, rz); scene.add(g); return g; };
+  // every piece gets its own tiny size offset, so touching parts never share an exact plane (that is what flickered)
+  let pieceN = 0; const jit = () => 1.004 + hash(pieceN++, 1.7, 3.1) * 0.012;
+  const box = (w, h, d, x, y, z, c, ry = 0) => { const j = jit(); const m = new THREE.Mesh(new THREE.BoxGeometry(w * j, h * j, d * j), typeof c === 'string' ? M(c) : c); m.position.set(x, y, z); m.rotation.y = ry; m.castShadow = m.receiveShadow = true; scene.add(m); return m; };
+  const vox = (nx, ny, nz, fn, size, x, y, z, ry = 0, rx = 0, rz = 0) => { const g = voxelGroup(voxelize(nx, ny, nz, fn, -Math.floor(nx / 2), 0, -Math.floor(nz / 2)), size); g.position.set(x, y, z); g.rotation.set(rx, ry, rz); g.scale.setScalar(jit()); scene.add(g); return g; };
   const tex = (w, h, draw, rx = 1, ry = 1) => {
     const cv = document.createElement('canvas'); cv.width = w; cv.height = h; draw(cv.getContext('2d'), w, h);
-    const t = new THREE.CanvasTexture(cv); t.magFilter = t.minFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry); return t;
+    // crisp up close, but averaged (mipmapped) far away so planks and wallpaper don't shimmer
+    const t = new THREE.CanvasTexture(cv); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true; t.anisotropy = 4; t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry); return t;
   };
   const { fy, hw, zb, zf, cz, hz, eave, ridge, rise } = ATTIC;
   const BOOKS = ['#9b3b3b', '#3f5f8f', '#5f8b3a', '#8b6b3a', '#5a3a8b', '#2f6f6f', '#c08a4a', '#4a4a4a', '#a0522d', '#6e4e34', '#7a2a5a', '#d9b36a'];
@@ -409,7 +424,7 @@ const attic = new THREE.Group();
     const sl = new THREE.PointLight('#ffb866', 0, 30, 1.5); sl.position.set(ax + 7, fy + 12, az - 4); scene.add(sl); roomLights.push({ light: sl, day: 30, night: 150 }); halo(ax + 7, fy + 12.5, az - 4, 6);
   }
   // ---- mezzanine at the back with railing, ladder, shelves and a reading corner ----
-  const MZ = { x0: 24, y: fy + 11.5, zhalf: 26 };
+  const MZ = { x0: 24, y: fy + 11.5, zhalf: 26 }; ATTIC.mz = MZ;
   {
     const deckT = tex(32, 32, planks(['#b07a48', '#9a6a3e', '#8a5c34', '#5a3a22']), 3, 7);
     const deck = new THREE.Mesh(new THREE.BoxGeometry(hw - MZ.x0, 0.8, MZ.zhalf * 2), new THREE.MeshStandardMaterial({ map: deckT, roughness: 0.9 })); deck.position.set((MZ.x0 + hw) / 2, MZ.y, 0); deck.castShadow = deck.receiveShadow = true; scene.add(deck);
@@ -515,13 +530,77 @@ const attic = new THREE.Group();
     roomAnims.push((t, dt) => { motes.forEach((m, i) => { m.y -= dt * 0.12; m.x += Math.sin(t * 0.4 + m.ph) * 0.1 * dt; if (m.y < fy + 0.5) m.y = fy + 24; D.position.set(m.x + Math.sin(t + m.ph) * 0.3, m.y, m.z + Math.cos(t * 0.7 + m.ph) * 0.3); D.rotation.set(0, 0, 0); D.scale.setScalar(0.1); D.updateMatrix(); mesh.setMatrixAt(i, D.matrix); }); mesh.instanceMatrix.needsUpdate = true; mesh.material.opacity = 0.2 + 0.45 * daylight; }); }
 }
 attic.rotation.y = Math.PI / 2; scene.add(attic);
-function clampCamera() {
-  const { fy, hw, zb, zf } = ATTIC, c = camera.position, tg = controls.target;
-  const inside = p => Math.abs(p.z) < hw - 0.8 && p.x > zb + 0.8 && p.x < zf - 0.8 && p.y > fy + 0.8 && p.y < roofY(p.x) - 0.8;
-  if (inside(c)) return;
-  const off = c.clone().sub(tg);
-  for (let i = 0; i < 40 && !inside(c); i++) { off.multiplyScalar(0.96); c.copy(tg).add(off); }
+// ---- camera collision ----
+// The orbit keeps the distance the user chose (userR). Each frame we look along the view ray, and a little to either
+// side of it, for the nearest wall, roof slope or piece of furniture, and ease the camera in front of it and back out
+// again afterwards. Looking to the sides lets the camera start moving in before the obstacle is right behind it,
+// so auto-rotation glides instead of jumping.
+attic.updateMatrixWorld(true);
+const camBlockers = [];
+{
+  const b = new THREE.Box3(), sz = new V3();
+  for (const o of attic.children) {
+    if (o.isSprite || o.isLight || shafts2.includes(o)) continue;
+    if (o.isMesh && !(o.geometry && o.geometry.type === 'BoxGeometry')) continue; // planes: walls, floor, roof, rug, windows, paintings
+    b.setFromObject(o); if (b.isEmpty()) continue; b.getSize(sz);
+    if (sz.x > 30 || sz.y > 30 || sz.z > 30) continue;   // rafters, purlins, beams along the walls: covered by the room margins
+    if (Math.max(sz.x, sz.y, sz.z) < 1.5) continue;     // candles, cups, leaves
+    if (sz.x < 1 && sz.z < 1) continue;                  // chains and thin rods
+    camBlockers.push(b.clone().expandByScalar(0.7));
+  }
+  // the mezzanine and everything under it (world: local z -> x, local -x -> z)
+  const mz = ATTIC.mz;
+  camBlockers.push(new THREE.Box3(new V3(-mz.zhalf - 0.7, ATTIC.fy, -ATTIC.hw), new V3(mz.zhalf + 0.7, mz.y + 5, -(mz.x0 - 1.5))));
 }
+const UP = new V3(0, 1, 0), camOff = new V3(), camDir = new V3(), camSide = new V3(), invDir = new V3();
+let userR = camera.position.distanceTo(controls.target), camR = userR, camV = 0;
+function resetCamR() { userR = camR = camera.position.distanceTo(controls.target); camV = 0; }
+function insideRoom(p) {
+  const { fy, hw, zb, zf } = ATTIC, m = 2;
+  return Math.abs(p.z) < hw - m && p.x > zb + m && p.x < zf - m && p.y > fy + 1.5 && p.y < roofY(p.x) - 2;
+}
+const rp = new V3();
+function rayLimit(o, d) {
+  // distance to the room's inner shell (binary search) ...
+  let lim = 120;
+  if (insideRoom(o)) {
+    let lo = 0, hi = 120;
+    for (let i = 0; i < 22; i++) { const m = (lo + hi) / 2; if (insideRoom(rp.copy(o).addScaledVector(d, m))) lo = m; else hi = m; }
+    lim = lo;
+  }
+  // ... and to the first piece of furniture (slab test against padded boxes)
+  invDir.set(1 / d.x, 1 / d.y, 1 / d.z);
+  for (const b of camBlockers) {
+    if (b.containsPoint(o)) continue;
+    let t1 = (b.min.x - o.x) * invDir.x, t2 = (b.max.x - o.x) * invDir.x, tmin = Math.min(t1, t2), tmax = Math.max(t1, t2);
+    t1 = (b.min.y - o.y) * invDir.y; t2 = (b.max.y - o.y) * invDir.y; tmin = Math.max(tmin, Math.min(t1, t2)); tmax = Math.min(tmax, Math.max(t1, t2));
+    t1 = (b.min.z - o.z) * invDir.z; t2 = (b.max.z - o.z) * invDir.z; tmin = Math.max(tmin, Math.min(t1, t2)); tmax = Math.min(tmax, Math.max(t1, t2));
+    if (tmax >= Math.max(tmin, 0) && tmin < lim) lim = Math.max(0, tmin);
+  }
+  return lim;
+}
+function cameraCollide(dt, r0) {
+  const tg = controls.target, r1 = camOff.subVectors(camera.position, tg).length(); if (r1 < 1e-4) return;
+  if (r0 > 1e-4 && Math.abs(r1 - r0) > 1e-4) userR = clamp(userR * r1 / r0, controls.minDistance, controls.maxDistance); // the user zoomed
+  camDir.copy(camOff).divideScalar(r1);
+  const hard = rayLimit(tg, camDir);
+  let soft = hard;
+  // look further ahead the closer the obstacle is weighted: near side rays count fully, far ones a little less
+  for (const [a, w] of [[-0.6, 0.6], [-0.4, 0.8], [-0.2, 1], [0.2, 1], [0.4, 0.8], [0.6, 0.6]]) {
+    const l = rayLimit(tg, camSide.copy(camDir).applyAxisAngle(UP, a));
+    soft = Math.min(soft, l + (1 - w) * Math.max(0, userR - l));
+  }
+  const want = Math.max(2.5, Math.min(userR, soft - 1.2));
+  // critically damped spring: speed builds up and dies down gradually, so there is no sudden lurch
+  const w0 = want < camR ? 3.2 : 1.8, step = Math.min(dt, 0.05);
+  camV += (w0 * w0 * (want - camR) - 2 * w0 * camV) * step;
+  camR += camV * step;
+  const hardMax = Math.max(1.5, hard - 0.3);
+  if (camR > hardMax) { camR = hardMax; camV = Math.min(camV, 0); }        // never actually inside anything
+  if (dt >= 1) { camR = Math.min(want, hardMax); camV = 0; }              // instant placement (after teleports)
+  camera.position.copy(tg).addScaledVector(camDir, camR);
+}
+function clampCamera() { cameraCollide(1, 0); }
 function updRoom(t, dt) {
   const n = 1 - daylight, lit = clamp((n - 0.15) / 0.5, 0, 1);
   for (const r of roomLights) if (r.light) r.light.intensity = r.day + (r.night - r.day) * lit;
@@ -1781,7 +1860,7 @@ function enterSub(on) {
   hud.style.display = hudHint.style.display = on ? 'block' : 'none';
   document.getElementById('pad').style.display = on ? 'grid' : 'none';
   document.getElementById('sub').textContent = on ? 'Gå ut' : 'Ubåt';
-  if (!on) { controls.target.copy(sub.pos); camera.position.copy(sub.pos).add(new V3(6, 5, 14)); controls.update(); clampCamera(); }
+  if (!on) { controls.target.copy(sub.pos); camera.position.copy(sub.pos).add(new V3(6, 5, 14)); controls.update(); resetCamR(); }
 }
 document.getElementById('sub').onclick = () => enterSub(!sub.piloted);
 addEventListener('keydown', e => { if (e.key === 'Escape' && sub.piloted) enterSub(false); });
@@ -1970,6 +2049,84 @@ pixBtn.onclick = () => {
 const rotBtn = document.getElementById('rot');
 rotBtn.onclick = () => { controls.autoRotate = !controls.autoRotate; rotBtn.textContent = controls.autoRotate ? 'Stopp rotasjon' : 'Auto-rotér'; };
 
+// ================= Picture-in-picture =================
+// The 3D view is copied, with crisp pixels, into a 2D canvas whose stream feeds a muted <video>.
+// That video is what goes into the browser's picture-in-picture window: no frame, no buttons, always on top.
+// It is a picture of the aquarium, so it is not interactive; the page itself keeps working as normal.
+const pip = { canvas: document.createElement('canvas'), video: document.getElementById('pipvideo'), active: false, stream: null, w: 960, h: 540, fallback: false };
+pip.ctx = pip.canvas.getContext('2d');
+const pipBtn = document.getElementById('pipbtn');
+const notice = (html) => { document.getElementById('noticetxt').innerHTML = html; document.getElementById('notice').style.display = 'block'; };
+document.getElementById('noticeok').onclick = () => { document.getElementById('notice').style.display = 'none'; };
+function pipSize() {
+  // integer upscale of a 16:9 crop of the low-resolution render, so the pixels stay square and sharp
+  const src = renderer.domElement, cw = Math.min(src.width, Math.round(src.height * 16 / 9)), ch = Math.round(cw * 9 / 16);
+  const k = Math.max(1, Math.ceil(960 / cw));
+  pip.w = cw * k; pip.h = ch * k; pip.canvas.width = pip.w; pip.canvas.height = pip.h;
+}
+let lastPipDraw = 0;
+function pipDraw(force) {
+  if (!pip.active) return;
+  const now = performance.now(); if (!force && now - lastPipDraw < 30) return; lastPipDraw = now; // 30 fps is plenty, and copying from WebGL is not free
+  const src = renderer.domElement, sw = src.width, sh = src.height;
+  let cw = sw, ch = Math.round(sw * 9 / 16); if (ch > sh) { ch = sh; cw = Math.round(sh * 16 / 9); }
+  pip.ctx.imageSmoothingEnabled = false;
+  pip.ctx.drawImage(src, Math.floor((sw - cw) / 2), Math.floor((sh - ch) / 2), cw, ch, 0, 0, pip.w, pip.h);
+}
+function pipStop() {
+  pip.active = false; pip.video.classList.remove('show'); pipBtn.textContent = 'Bilde i bilde';
+  if (pip.stream) { pip.stream.getTracks().forEach(t => t.stop()); pip.stream = null; }
+  pip.video.srcObject = null;
+}
+async function pipStart() {
+  if (!pip.canvas.captureStream) { notice('Denne nettleseren kan ikke lage videostrøm av akvariet, så bilde i bilde er ikke mulig her. Prøv Chrome, Edge eller Safari.'); return; }
+  select(null);
+  pipSize(); pip.active = true;
+  renderer.render(scene, camera); pipDraw(true); // the video needs a first frame before it can start
+  pip.stream = pip.canvas.captureStream(30);
+  pip.video.srcObject = pip.stream; pip.video.muted = true;
+  try {
+    await pip.video.play();
+    if (pip.video.readyState < 1) await new Promise(r => pip.video.addEventListener('loadedmetadata', r, { once: true }));
+  } catch (e) { pipStop(); notice('Klarte ikke å starte videostrømmen: ' + e.message); return; }
+  pipBtn.textContent = 'Lukk bilde i bilde';
+  if (document.pictureInPictureEnabled && pip.video.requestPictureInPicture) {
+    try { await pip.video.requestPictureInPicture(); return; }
+    catch (e) {
+      pipStop();
+      notice('Nettleseren eller visningen her tillot ikke bilde i bilde (' + e.name + ').<br><br>Det virker når siden åpnes direkte: last ned HTML-filen og åpne den i Chrome eller Edge, og trykk «Bilde i bilde» der.');
+      return;
+    }
+  }
+  // Firefox has no API for this, but its own picture-in-picture button appears on videos it can see
+  pip.video.classList.add('show');
+  notice('Firefox lar ikke siden åpne bilde i bilde selv. En liten video av akvariet ligger nå nede til høyre: hold musepekeren over den og trykk Firefox sin bilde-i-bilde-knapp (eller høyreklikk og velg «Bilde-i-bilde»).<br><br>Trykk «Lukk bilde i bilde» for å fjerne den.');
+}
+pip.video.addEventListener('leavepictureinpicture', () => pipStop());
+pip.video.addEventListener('pause', () => { if (pip.active) pip.video.play().catch(() => {}); });
+pipBtn.onclick = () => { if (pip.active) { if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {}); pipStop(); } else pipStart(); };
+addEventListener('resize', () => { if (pip.active) pipSize(); });
+// Hidden tabs stop requestAnimationFrame. A worker timer keeps the aquarium running while it is shown in picture-in-picture.
+let lastRaf = performance.now();
+try {
+  const tick = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 33)'], { type: 'text/javascript' })));
+  let lastTick = 0;
+  tick.onmessage = () => {
+    // only when the tab is hidden (requestAnimationFrame has stopped), and never let queued ticks pile up
+    const now = performance.now();
+    if (!pip.active || !document.hidden || now - lastTick < 28 || now - lastRaf < 200) return;
+    step(); lastTick = performance.now();
+  };
+} catch (e) {}
+// H hides all menus for a clean view
+const setClean = on => document.body.classList.toggle('clean', on);
+document.getElementById('showui').onclick = () => setClean(false);
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || sub.piloted) return;
+  if (e.code === 'KeyH') setClean(!document.body.classList.contains('clean'));
+  if (e.code === 'KeyP') pipBtn.click();
+});
+
 // ================= Loop =================
 const clock = new THREE.Clock();
 function simStep(dt, t) {
@@ -1980,18 +2137,20 @@ function simStep(dt, t) {
   updDiver(dt); updClam(dt); updBoats(dt, t); updSub(dt, t); updDuckweed(dt, t);
   updBubbles(dt, t); updFood(dt, t); updParts(dt); updRipples(dt);
 }
-window.__aq = { scene, bubbleMesh, airStone, sub, boats, enterSub, snail, attic, pair, goby, fish, foods, crab, chest, simStep, dropFood, camera, controls, knock, snail, shrimps, select, pickFish,
+window.__aq = { camStep(dt) { const r0 = camera.position.distanceTo(controls.target); controls.update(); cameraCollide(dt, r0); }, insideRoom, resetCamR, camBlockers, get camR() { return camR; }, get userR() { return userR; }, get pip() { return pip; }, pipSize, pipDraw, scene, bubbleMesh, airStone, sub, boats, enterSub, snail, attic, pair, goby, fish, foods, crab, chest, simStep, dropFood, camera, controls, knock, snail, shrimps, select, pickFish,
   get daylight() { return daylight; }, setDay(k) { dayTarget = k; }, forceDay(k) { daylight = dayTarget = k; applyDaylight(k); }, get scare() { return scare; } };
-function frame() {
+function step() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
   updDaylight(dt);
   simStep(dt, t);
   updWeeds(t); updSurface(t); updShafts(t); updFlag(t); updCaustics(t, dt); updSelection(dt); updRoom(t, dt);
-  controls.update(); if (!sub.piloted) clampCamera();
+  const r0 = camera.position.distanceTo(controls.target);
+  controls.update(); if (!sub.piloted) cameraCollide(dt, r0);
   if (camShake > 0 && !sub.piloted) { camShake -= dt; const a = camShake * 0.12; camera.position.x += Math.sin(t * 90) * a; camera.position.y += Math.cos(t * 70) * a; }
   renderer.render(scene, camera);
-  requestAnimationFrame(frame);
+  pipDraw();
 }
+function frame() { lastRaf = performance.now(); step(); requestAnimationFrame(frame); }
 frame();
 </script>
 </body>

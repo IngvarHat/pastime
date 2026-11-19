@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ravnedal – en middelalderdal</title>
+<title>Ravnedal – et middelalderland</title>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
 <style>
   html,body{margin:0;height:100%;overflow:hidden;background:#0b0d14;color:#f1e4c2;font-family:'Press Start 2P',monospace;}
@@ -32,6 +32,10 @@
   #label .a{font-family:'VT323',monospace;font-size:16px;color:#bfe3a0;margin-top:3px}
   #label .row{margin-top:6px;display:flex;gap:5px}
   #label button{padding:5px 7px;font-size:8px}
+  #notice{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);max-width:min(520px,90vw);background:#140f0bee;border:2px solid #f2c35b;padding:16px 18px;font-family:'VT323',monospace;font-size:19px;line-height:1.15;color:#f8eed6;z-index:8}
+  #notice button{margin-top:12px;font-family:'Press Start 2P',monospace}
+  #pipvideo{position:fixed;right:14px;bottom:70px;width:2px;height:2px;opacity:0;pointer-events:none;z-index:7;border:2px solid #f2c35b;background:#000}
+  #pipvideo.show{width:320px;height:180px;opacity:1;pointer-events:auto}
   #err{display:none;position:fixed;inset:0;padding:24px;font-size:11px;line-height:1.8;background:#0b0d14;color:#ffb3b3;white-space:pre-wrap;z-index:9}
   body.clean .hint, body.clean .bar, body.clean #label, body.clean #log, body.clean #clock{display:none !important}
   #showui{display:none;position:fixed;right:10px;bottom:10px;padding:6px 8px;font-size:8px;opacity:.25;z-index:6}
@@ -51,7 +55,7 @@
 </style>
 </head>
 <body>
-<div class="hint">Kameraet flyr en rute gjennom landet · Dra i bildet for å styre selv<br>Klikk på noe for å se hva det er · H: skjul menyen</div>
+<div class="hint">Kameraet flyr en rute gjennom landet · Dra i bildet for å styre selv<br>Klikk på noe for å se hva det er · H: skjul menyen · P: bilde i bilde</div>
 <div id="clock"></div>
 <div id="area"><b id="areaN"></b><span id="areaS"></span></div>
 <div id="title"><h1>Ravnedal</h1><p>et land mellom hav, fjell, ørken og ild – en gang for lenge siden</p></div>
@@ -70,8 +74,11 @@
   <button id="bweather">Vær: klart</button>
   <button id="bsnd">Lyd: av</button>
   <button id="bpix">Piksler: 3</button>
+  <button id="bpip">Bilde i bilde</button>
 </div>
 <button id="showui">Vis meny</button>
+<div id="notice"><div id="noticetxt"></div><button id="noticeok">OK</button></div>
+<video id="pipvideo" muted playsinline></video>
 <div id="err"></div>
 <script>
   window.showErr = (m) => { const e = document.getElementById('err'); e.style.display = 'block'; e.textContent += m + '\n'; };
@@ -2559,6 +2566,7 @@ addEventListener('keydown', e => {
   else if (e.key === 'f' || e.key === 'F') $('bfollow').click();
   else if (e.key === 'n' || e.key === 'N') $('bevent').click();
   else if (e.key === 't' || e.key === 'T' || e.key === ' ') { e.preventDefault(); $('bfly').click(); }
+  else if (e.key === 'p' || e.key === 'P') $('bpip').click();
 });
 
 // ---- Seasons: recolour tagged faces a few meshes per frame ----
@@ -2616,17 +2624,75 @@ function areaCheck(dt) {
   areaT -= dt; $('area').style.opacity = areaT > 0 ? 1 : 0;
 }
 
+// ---- Picture-in-picture ----
+// The low-resolution render is copied with crisp pixels into a 2D canvas whose stream feeds a muted <video>.
+// That video goes into the browser's picture-in-picture window. It is a picture, not interactive; the page keeps working.
+const pip = { canvas: document.createElement('canvas'), video: $('pipvideo'), active: false, stream: null, w: 960, h: 540 };
+pip.ctx = pip.canvas.getContext('2d');
+const notice = html => { $('noticetxt').innerHTML = html; $('notice').style.display = 'block'; };
+$('noticeok').onclick = () => { $('notice').style.display = 'none'; };
+function pipSize() {
+  const src = renderer.domElement, cw = Math.min(src.width, Math.round(src.height * 16 / 9)), ch = Math.round(cw * 9 / 16);
+  const k = Math.max(1, Math.ceil(960 / cw)); pip.w = cw * k; pip.h = ch * k; pip.canvas.width = pip.w; pip.canvas.height = pip.h;
+}
+let lastPipDraw = 0;
+function pipDraw(force) {
+  if (!pip.active) return;
+  const now = performance.now(); if (!force && now - lastPipDraw < 30) return; lastPipDraw = now;
+  const src = renderer.domElement, sw = src.width, sh = src.height, g = pip.ctx;
+  let cw = sw, ch = Math.round(sw * 9 / 16); if (ch > sh) { ch = sh; cw = Math.round(sh * 16 / 9); }
+  g.imageSmoothingEnabled = false;
+  g.drawImage(src, Math.floor((sw - cw) / 2), Math.floor((sh - ch) / 2), cw, ch, 0, 0, pip.w, pip.h);
+  // the place name, when one is showing, so the small window still tells you where you are
+  if (areaT > 0 && areaNow) {
+    const a = clamp(areaT, 0, 1), fs = Math.round(pip.h / 15);
+    g.save(); g.globalAlpha = a; g.textAlign = 'center'; g.textBaseline = 'top';
+    g.font = fs + "px 'Press Start 2P', monospace"; g.fillStyle = '#000'; g.fillText(areaNow[0], pip.w / 2 + 3, pip.h * 0.07 + 3); g.fillStyle = '#f2c35b'; g.fillText(areaNow[0], pip.w / 2, pip.h * 0.07);
+    g.font = Math.round(fs * 0.95) + "px 'VT323', monospace"; g.fillStyle = '#000'; g.fillText(areaNow[1], pip.w / 2 + 2, pip.h * 0.07 + fs * 1.6 + 2); g.fillStyle = '#f8eed6'; g.fillText(areaNow[1], pip.w / 2, pip.h * 0.07 + fs * 1.6);
+    g.restore();
+  }
+}
+function pipStop() {
+  pip.active = false; pip.video.classList.remove('show'); $('bpip').textContent = 'Bilde i bilde'; $('bpip').classList.remove('on');
+  if (pip.stream) { pip.stream.getTracks().forEach(t => t.stop()); pip.stream = null; }
+  pip.video.srcObject = null;
+}
+async function pipStart() {
+  if (!pip.canvas.captureStream) { notice('Denne nettleseren kan ikke lage en videostrøm av bildet, så bilde i bilde er ikke mulig her. Prøv Chrome, Edge eller Safari.'); return; }
+  hideLabel(); pipSize(); pip.active = true;
+  renderer.render(scene, camera); pipDraw(true);
+  pip.stream = pip.canvas.captureStream(30); pip.video.srcObject = pip.stream; pip.video.muted = true;
+  try { await pip.video.play(); if (pip.video.readyState < 1) await new Promise(r => pip.video.addEventListener('loadedmetadata', r, { once: true })); }
+  catch (e) { pipStop(); notice('Klarte ikke å starte videostrømmen: ' + e.message); return; }
+  $('bpip').textContent = 'Lukk bilde i bilde'; $('bpip').classList.add('on');
+  if (mode !== 'tour' && !follow.ent) startTour();
+  if (document.pictureInPictureEnabled && pip.video.requestPictureInPicture) {
+    try { await pip.video.requestPictureInPicture(); return; }
+    catch (e) { pipStop(); notice('Nettleseren eller visningen her tillot ikke bilde i bilde (' + e.name + ').<br><br>Det virker når siden åpnes direkte i Chrome eller Edge: åpne artefakten i en egen fane og trykk «Bilde i bilde» der.'); return; }
+  }
+  pip.video.classList.add('show');
+  notice('Firefox lar ikke siden åpne bilde i bilde selv. En liten video ligger nå nede til høyre: hold musepekeren over den og trykk Firefox sin bilde-i-bilde-knapp (eller høyreklikk og velg «Bilde-i-bilde»).<br><br>Trykk «Lukk bilde i bilde» for å fjerne den.');
+}
+pip.video.addEventListener('leavepictureinpicture', () => pipStop());
+pip.video.addEventListener('pause', () => { if (pip.active) pip.video.play().catch(() => {}); });
+$('bpip').onclick = () => { if (pip.active) { if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {}); pipStop(); } else pipStart(); };
+addEventListener('resize', () => { if (pip.active) pipSize(); });
+// A hidden tab stops requestAnimationFrame. A worker timer keeps the world (and the flight) going while it is shown in picture-in-picture.
+let lastRaf = performance.now();
+try {
+  const tick = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 33)'], { type: 'text/javascript' })));
+  let lastTick = 0;
+  tick.onmessage = () => { const now = performance.now(); if (!pip.active || !document.hidden || now - lastTick < 28 || now - lastRaf < 200) return; tickOnce(); lastTick = performance.now(); };
+} catch (e) {}
+
 // ---- Main loop ----
 const clock = new THREE.Clock();
 let saveT = 0, miniT = 0, socT = 0;
 say('Velkommen til Ravnedal! Kameraet tar deg med på en flytur – dra i bildet for å utforske selv, eller klikk på folk og hus.', null);
 setTimeout(() => { $('title').style.opacity = 0; }, 5500);
 tourStep(0.001); tourBlend = 1;
-function frame() {
-  requestAnimationFrame(frame);
-  step(Math.min(0.05, clock.getDelta()));
-  renderer.render(scene, camera);
-}
+function tickOnce() { step(Math.min(0.05, clock.getDelta())); renderer.render(scene, camera); pipDraw(); }
+function frame() { lastRaf = performance.now(); requestAnimationFrame(frame); tickOnce(); }
 function step(dt) {
   simT += dt;
   dayT += dt * timeMul / 300; tod = dayT % 1;
@@ -2671,7 +2737,7 @@ function step(dt) {
   $('bjump').textContent = isDay() ? 'Til natt' : 'Til dag';
   saveT += dt; if (saveT > 8) { saveT = 0; store.data.dayT = dayT; save(); }
 }
-window.__dal = { scene, camera, controls, ents, dragon, knight, merchant, troll, unicorn, wizard, fisher, witch, serpent, ships, thief, startFollow, fireEvent, setWeather, startTour, stopTour, setTod: t => { dayT = Math.floor(dayT) + t; tod = t; }, get tod() { return tod; }, get mode() { return mode; }, setTourU: u => { tourU = u; camY = null; }, renderer, colH, biomeAt, sim: (secs) => { const t0 = performance.now(); for (let t = 0; t < secs; t += 0.05) step(0.05); return performance.now() - t0; }, flushSeason: () => { while (seasonQ.length) recolor(seasonQ.pop(), seasonShown); }, navPath, navStats, STOCK, sheep, get season() { return seasonIdx(); }, setSeason: i => { seasonOff = ((i - Math.floor(dayT / 2)) % 4 + 4) % 4; } };
+window.__dal = { scene, camera, controls, ents, dragon, knight, merchant, troll, unicorn, wizard, fisher, witch, serpent, ships, thief, startFollow, fireEvent, setWeather, startTour, stopTour, setTod: t => { dayT = Math.floor(dayT) + t; tod = t; }, get tod() { return tod; }, get mode() { return mode; }, setTourU: u => { tourU = u; camY = null; }, renderer, pip, pipStart, pipDraw, pipSize, colH, biomeAt, sim: (secs) => { const t0 = performance.now(); for (let t = 0; t < secs; t += 0.05) step(0.05); return performance.now() - t0; }, flushSeason: () => { while (seasonQ.length) recolor(seasonQ.pop(), seasonShown); }, navPath, navStats, STOCK, sheep, get season() { return seasonIdx(); }, setSeason: i => { seasonOff = ((i - Math.floor(dayT / 2)) % 4 + 4) % 4; } };
 frame();
 
 </script>
